@@ -1,0 +1,13 @@
+{
+  "_comment": "Skopiuj sekcję 'cron-job-org' do swojego pliku konfiguracji Claude Code. Lokalizacja: ~/.claude.json (lub równoważny per Twoja wersja).",
+  "mcpServers": {
+    "cron-job-org": {
+      "command": "python3",
+      "args": ["-m", "cron_job_org_mcp"],
+      "env": {
+        "CRON_JOB_ORG_API_KEY": "WKLEJ_TUTAJ_TOKEN_Z_CRON_JOB_ORG",
+        "CRON_JOB_ORG_DEFAULT_TIMEZONE": "Europe/Warsaw"
+      }
+    }
+  }
+}
