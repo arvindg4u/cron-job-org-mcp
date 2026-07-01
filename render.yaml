@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: cron-job-mcp
+    runtime: python
+    plan: free
+    buildCommand: pip install -e .
+    startCommand: python -m cron_job_org_mcp.http_server
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        generateValue: true
+      - key: HOST
+        value: 0.0.0.0
+      - key: CRON_JOB_ORG_API_KEY
+        sync: false
