@@ -6,6 +6,8 @@ Wymaga: env var CRON_JOB_ORG_API_KEY
 Tools (8):
   list_jobs, get_job, create_job, update_job, delete_job,
   enable_job, disable_job, get_history
+
+Secrets in job URLs, headers and body come back masked (***), see redact.py.
 """
 
 from __future__ import annotations
@@ -18,6 +20,15 @@ from dotenv import load_dotenv
 from fastmcp import FastMCP
 
 from .api import CronJobOrgClient, CronJobOrgError
+from .redact import (
+    has_mask,
+    headers_have_mask,
+    mask_headers,
+    mask_secrets,
+    restore_headers,
+    restore_url,
+    same_origin,
+)
 from .schedule import cron_to_dict, dict_to_cron
 
 load_dotenv()
@@ -51,6 +62,35 @@ def _get_client() -> CronJobOrgClient:
     return CronJobOrgClient(api_key=key)
 
 
+def _history_item(h: dict) -> dict:
+    return {
+        "identifier": h.get("identifier"),
+        "date": h.get("date"),
+        "http_status": h.get("httpStatus"),
+        "duration_ms": h.get("duration"),
+        "status_text": h.get("statusText", ""),
+        # cron-job.org's own verdict (1 = OK): any 2xx, plus 3xx with redirectSuccess
+        "ok": h.get("status") == 1,
+    }
+
+
+def _restore_masked(c: CronJobOrgClient, job_id: int, partial: dict) -> None:
+    """Swap *** copied from get_job for the job's current values, in place."""
+    current = c.get_job(job_id)
+    current_url = current.get("url", "")
+    if "url" in partial:
+        partial["url"] = restore_url(partial["url"], current_url)
+    headers = partial.get("extendedData", {}).get("headers")
+    if headers_have_mask(headers):
+        if not same_origin(partial.get("url", current_url), current_url):
+            raise ValueError(
+                "headers have masked values (***), but the url moves to another scheme, host "
+                "or port. Masked values are restored only for the same address: pass real values."
+            )
+        current_headers = (current.get("extendedData") or {}).get("headers")
+        partial["extendedData"]["headers"] = restore_headers(headers, current_headers)
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -65,7 +105,7 @@ def list_jobs(filter_title: str = "") -> list[dict]:
 
     Returns:
         List of jobs with: id, title, url, enabled, schedule (cron expr), last_status,
-        last_execution, last_duration_ms.
+        last_execution, last_duration_ms. Secret URL params (token=, key=, …) show as ***.
     """
     with _get_client() as c:
         jobs = c.list_jobs()
@@ -76,7 +116,7 @@ def list_jobs(filter_title: str = "") -> list[dict]:
         {
             "id": j.get("jobId"),
             "title": j.get("title", ""),
-            "url": j.get("url", ""),
+            "url": mask_secrets(j.get("url", "")),
             "enabled": j.get("enabled", False),
             "schedule": dict_to_cron(j.get("schedule") or {}),
             "last_status": j.get("lastStatus"),
@@ -97,7 +137,8 @@ def get_job(job_id: int) -> dict:
     Returns:
         Job details: id, title, url, enabled, schedule (cron expr + raw), method,
         timezone, headers, body, last_status, last_execution, last_duration_ms.
-        Plus last 5 history items.
+        Plus last 5 history items (same shape as get_history).
+        Secrets show as ***: URL params like token=/key=, auth headers, secret body fields.
     """
     with _get_client() as c:
         details = c.get_job(job_id)
@@ -112,18 +153,18 @@ def get_job(job_id: int) -> dict:
     return {
         "id": details.get("jobId"),
         "title": details.get("title", ""),
-        "url": details.get("url", ""),
+        "url": mask_secrets(details.get("url", "")),
         "enabled": details.get("enabled", False),
         "schedule_cron": dict_to_cron(schedule_dict),
         "schedule_raw": schedule_dict,
         "timezone": schedule_dict.get("timezone"),
         "request_method": details.get("requestMethod", 0),
-        "headers": extended.get("headers", {}),
-        "body": extended.get("body", ""),
+        "headers": mask_headers(extended.get("headers", {})),
+        "body": mask_secrets(extended.get("body", "")),
         "last_status": details.get("lastStatus"),
         "last_execution": details.get("lastExecution"),
         "last_duration_ms": details.get("lastDuration"),
-        "history_recent": history,
+        "history_recent": [_history_item(h) for h in history],
     }
 
 
@@ -151,9 +192,17 @@ def create_job(
         headers: dict of extra HTTP headers (e.g. {"X-Custom-Token": "..."}).
         timezone: IANA tz (e.g. 'Europe/Warsaw'). Default: env CRON_JOB_ORG_DEFAULT_TIMEZONE or 'Europe/Warsaw'.
 
+    Pass real values: *** copied from list_jobs/get_job is refused (nothing to restore it from).
+
     Returns:
-        Created job: id, title, url, schedule, enabled.
+        Created job: id, title, url (secrets as ***), schedule, enabled.
     """
+    if has_mask(url) or headers_have_mask(headers) or has_mask(body):
+        raise ValueError(
+            "url, headers or body contain a masked value (***) from list_jobs/get_job. "
+            "create_job can't restore it: pass the real value."
+        )
+
     tz = timezone or DEFAULT_TIMEZONE
     schedule = cron_to_dict(cron_expression, timezone=tz)
 
@@ -184,7 +233,7 @@ def create_job(
     return {
         "id": new_id,
         "title": title,
-        "url": url,
+        "url": mask_secrets(url),
         "schedule": cron_expression,
         "enabled": enabled,
         "timezone": tz,
@@ -216,8 +265,17 @@ def update_job(
         headers: new headers dict. None = no change.
         timezone: new timezone (if cron_expression provided, defaults to existing or 'Europe/Warsaw').
 
+    url and headers may keep *** copied from get_job: the job's current values are put
+    back, as long as scheme, host and port stay the same. A body with *** is refused.
+
     Returns: { id, updated_fields: [...] }
     """
+    if has_mask(body):
+        raise ValueError(
+            "body contains a masked value (***) from get_job. Pass the full body, "
+            "or leave body out to keep the current one."
+        )
+
     partial: dict[str, Any] = {}
     updated_fields: list[str] = []
 
@@ -253,6 +311,8 @@ def update_job(
         return {"id": job_id, "updated_fields": [], "message": "no fields to update"}
 
     with _get_client() as c:
+        if has_mask(url) or headers_have_mask(headers):
+            _restore_masked(c, job_id, partial)
         c.update_job(job_id, partial)
 
     return {"id": job_id, "updated_fields": updated_fields, "ok": True}
@@ -298,22 +358,12 @@ def get_history(job_id: int, limit: int = 10) -> list[dict]:
 
     Returns:
         List of executions: {identifier, date, http_status, duration_ms, status_text, ok}
-        Sorted newest first.
+        Sorted newest first. ok is cron-job.org's own verdict: any 2xx (e.g. 202) counts.
     """
     with _get_client() as c:
         history = c.get_history(job_id)
     items = history[:limit] if limit > 0 else history
-    return [
-        {
-            "identifier": h.get("identifier"),
-            "date": h.get("date"),
-            "http_status": h.get("httpStatus"),
-            "duration_ms": h.get("duration"),
-            "status_text": h.get("statusText", ""),
-            "ok": h.get("httpStatus", 0) == 200 and h.get("status", 0) == 1,
-        }
-        for h in items
-    ]
+    return [_history_item(h) for h in items]
 
 
 # ---------------------------------------------------------------------------

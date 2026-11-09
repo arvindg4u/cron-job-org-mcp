@@ -26,6 +26,14 @@ Stop clicking through cron-job.org dashboard. Just ask Claude:
 
 Plus: **standard cron expressions** (`*/2 * * * *`, `0 8 * * 1`) are converted to cron-job.org's internal schedule dict format automatically. You can use the same cron syntax you know from crontab.
 
+### Secrets stay out of the transcript
+
+Job URLs often carry secrets (`?token=…`). The tools return them masked as `***`: secret-looking URL params (`token`, `key`, `secret`, `password`, `auth`, `signature`…), the password in `user:pass@`, auth headers (`Authorization`, `X-Api-Key`, `Cookie`, any `Bearer …`) and secret fields in the request body. cron-job.org always gets the real values.
+
+- `update_job` accepts `***` copied from `get_job` in `url` and `headers` and puts the job's current value back, but only while scheme, host and port stay the same.
+- `create_job`, and `update_job` with `***` in `body`, refuse masked values: pass the real ones.
+- `get_history` sets `ok` from cron-job.org's own verdict, so any 2xx (e.g. `202 Accepted`) counts as success.
+
 ## Quick start
 
 ### 1. Install
@@ -99,7 +107,7 @@ Claude → `list_jobs(filter_title="staging")` → for each result: `disable_job
 
 > *"Copy job 5523 but change the URL to point to the new domain and rename it."*
 
-Claude → `get_job(5523)` → reads config → `create_job(url=new_url, title=new_title, cron_expression=...)`.
+Claude → `get_job(5523)` → reads config (secrets masked) → `create_job(url=new_url, title=new_title, cron_expression=...)` with the full new URL.
 
 ## Configuration
 
